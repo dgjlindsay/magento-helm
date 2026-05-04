@@ -116,6 +116,29 @@ opensearch:
   storage: 5Gi
   javaOpts: "-Xms512m -Xmx512m"
 
+# Redis sidecar — backs cache.default, cache.page_cache, and session.
+# Without this, Magento defaults to filesystem backends with no eviction
+# policy, and var/page_cache fills the PVC over time → SessionHandler
+# write failures → admin 500s.
+#
+# Localhost-only, no Service. Cache is ephemeral (no persistence).
+redis:
+  enabled: true
+  image: redis
+  tag: "7.4-alpine"
+  host: 127.0.0.1
+  port: 6379
+  # Eviction. allkeys-lru drops the least-recently-used keys when memory is
+  # exhausted. Avoids a wedged pod if the cache hot set ever exceeds maxmemory.
+  maxmemory: "256mb"
+  maxmemoryPolicy: "allkeys-lru"
+  # Magento conventionally splits its three Redis uses across separate DBs
+  # so a session flush doesn't blow away the cache (and vice versa).
+  databases:
+    default: 0
+    pageCache: 1
+    session: 2
+
 # Persistence
 persistence:
   enabled: true
@@ -211,6 +234,13 @@ resources:
     limits:
       memory: "2Gi"
       cpu: "1000m"
+  redis:
+    requests:
+      memory: "128Mi"
+      cpu: "50m"
+    limits:
+      memory: "384Mi"
+      cpu: "500m"
 
 # Health checks
 healthCheck:

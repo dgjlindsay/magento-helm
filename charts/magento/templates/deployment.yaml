@@ -93,6 +93,30 @@ spec:
             {{- toYaml .Values.resources.opensearch | nindent 12 }}
         {{- end }}
 
+        {{- if .Values.redis.enabled }}
+        # Phase 2: Native sidecar - Redis (K8s 1.28+)
+        # Backs cache.default, cache.page_cache, and session — wired in
+        # init-setup.sh via setup:config:set. No persistence, no Service:
+        # cache is ephemeral and only reachable from this pod's localhost.
+        - name: redis
+          restartPolicy: Always
+          image: "{{ .Values.redis.image }}:{{ .Values.redis.tag }}"
+          args:
+            - --maxmemory
+            - {{ .Values.redis.maxmemory | quote }}
+            - --maxmemory-policy
+            - {{ .Values.redis.maxmemoryPolicy | quote }}
+            - --save
+            - ""
+            - --appendonly
+            - "no"
+          ports:
+            - name: redis
+              containerPort: {{ .Values.redis.port }}
+          resources:
+            {{- toYaml .Values.resources.redis | nindent 12 }}
+        {{- end }}
+
         # Phase 3: Git-sync init containers
         {{- range .Values.gitSync.plugins }}
         - name: init-git-sync-{{ .name }}

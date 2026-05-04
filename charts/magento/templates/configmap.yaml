@@ -32,6 +32,31 @@ data:
     # specific admin page rather than a clean restart-time error.
     trap fix_permissions EXIT
 
+    {{- if .Values.redis.enabled }}
+    # Wire app/etc/env.php to use the Redis sidecar for cache.default,
+    # cache.page_cache, and session. Idempotent — setup:config:set just
+    # rewrites the relevant keys in env.php. Must run AFTER env.php exists
+    # (i.e. after setup:install on fresh installs, or unconditionally on
+    # upgrades) and BEFORE setup:upgrade so the upgrade itself uses Redis.
+    configure_redis_backends() {
+      echo "Configuring Redis backends in env.php..."
+      mage setup:config:set --no-interaction \
+        --cache-backend=redis \
+        --cache-backend-redis-server={{ .Values.redis.host }} \
+        --cache-backend-redis-port={{ .Values.redis.port }} \
+        --cache-backend-redis-db={{ .Values.redis.databases.default }} \
+        --page-cache=redis \
+        --page-cache-redis-server={{ .Values.redis.host }} \
+        --page-cache-redis-port={{ .Values.redis.port }} \
+        --page-cache-redis-db={{ .Values.redis.databases.pageCache }} \
+        --session-save=redis \
+        --session-save-redis-host={{ .Values.redis.host }} \
+        --session-save-redis-port={{ .Values.redis.port }} \
+        --session-save-redis-db={{ .Values.redis.databases.session }} \
+        --session-save-redis-log-level=3
+    }
+    {{- end }}
+
     {{- if .Values.gitSync.plugins }}
     # Materialise git-sync plugins to a stable, non-rotating path.
     #
@@ -113,6 +138,28 @@ data:
     done
     {{- end }}
 
+    {{- if .Values.redis.enabled }}
+    # Wait for Redis (sidecar should be ready). Required before
+    # setup:upgrade / setup:install — both bootstrap the cache layer and
+    # will fail-fast if env.php points at an unreachable backend.
+    echo "Waiting for Redis..."
+    for i in $(seq 1 30); do
+      # Bash /dev/tcp probe — avoids depending on redis-cli being in the
+      # magento image. A successful connection means Redis is accepting
+      # clients; setup:config:set only writes env.php, the actual PING
+      # round-trips happen later when Magento boots its cache layer.
+      if (echo > /dev/tcp/{{ .Values.redis.host }}/{{ .Values.redis.port }}) 2>/dev/null; then
+        echo "Redis is ready"
+        break
+      fi
+      if [ $i -eq 30 ]; then
+        echo "ERROR: Redis not ready after 30 attempts"
+        exit 1
+      fi
+      sleep 2
+    done
+    {{- end }}
+
     # Restore sample-data-media if missing (idempotent via cp -n).
     # Runs for both install and upgrade paths so PVCs that lost their media
     # (or were created before this copy block existed) can recover without a
@@ -154,6 +201,17 @@ data:
 
       # Backup env.php before upgrade
       cp app/etc/env.php app/etc/env.php.bak
+
+      {{- if .Values.redis.enabled }}
+      # Re-assert Redis backends in env.php before setup:upgrade. The
+      # upgrade reads cache config, so any drift from values.yaml needs
+      # to land here and not after.
+      configure_redis_backends || {
+        echo "configure_redis_backends failed, restoring env.php backup"
+        cp app/etc/env.php.bak app/etc/env.php
+        exit 1
+      }
+      {{- end }}
 
       echo "Running setup:upgrade..."
       mage setup:upgrade || {
@@ -237,6 +295,13 @@ data:
         --opensearch-host='127.0.0.1' \
         --opensearch-port='9200'
         {{- end }}
+
+      {{- if .Values.redis.enabled }}
+      # Wire Redis backends into the freshly-written env.php before any
+      # subsequent mage command (setup:upgrade, di:compile, config:set)
+      # bootstraps the cache layer.
+      configure_redis_backends
+      {{- end }}
 
       # Disable 2FA for development
       mage module:disable Magento_AdminAdobeImsTwoFactorAuth Magento_TwoFactorAuth || true
